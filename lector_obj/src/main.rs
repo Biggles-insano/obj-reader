@@ -17,7 +17,6 @@ pub struct Mesh {
     pub normals:   Vec<Vec3>,
     /// Índices triangulados: cada tri guarda índices a posiciones/tex/normals por separado
     pub indices:   Vec<(u32, Option<u32>, Option<u32>)>, // v_idx, vt_idx?, vn_idx?
-
 }
 
 impl Mesh {
@@ -144,6 +143,143 @@ pub fn load_obj<P: AsRef<Path>>(path: P) -> Result<Mesh, String> {
     Ok(mesh)
 }
 
+// ====================== RASTER =======================
+const WIDTH: usize = 800;
+const HEIGHT: usize = 600;
+
+struct Framebuffer {
+    w: usize,
+    h: usize,
+    /// RGB8, fila invertida (y=0 arriba)
+    data: Vec<u8>,
+}
+
+impl Framebuffer {
+    fn new(w: usize, h: usize) -> Self {
+        Self { w, h, data: vec![0; w * h * 3] }
+    }
+
+    #[inline]
+    fn put_pixel(&mut self, x: i32, y: i32, r: u8, g: u8, b: u8) {
+        if x < 0 || y < 0 { return; }
+        let (x, y) = (x as usize, y as usize);
+        if x >= self.w || y >= self.h { return; }
+        let idx = (y * self.w + x) * 3;
+        self.data[idx + 0] = r;
+        self.data[idx + 1] = g;
+        self.data[idx + 2] = b;
+    }
+
+    fn clear(&mut self, r: u8, g: u8, b: u8) {
+        for px in self.data.chunks_mut(3) {
+            px[0] = r; px[1] = g; px[2] = b;
+        }
+    }
+
+    /// Guarda un BMP 24-bit sin compresión (fácil, sin dependencias)
+    fn save_bmp(&self, path: &str) -> std::io::Result<()> {
+        let row_stride = ((self.w * 3 + 3) / 4) * 4; // padding a múltiplos de 4
+        let pixel_array_size = row_stride * self.h;
+        let file_size = 14 + 40 + pixel_array_size; // BMP header + DIB header + data
+
+        let mut f = File::create(path)?;
+        // BMP Header
+        f.write_all(&[b'B', b'M'])?;                 // Signature
+        f.write_all(&(file_size as u32).to_le_bytes().as_ref())?; // File size
+        f.write_all(&[0, 0, 0, 0])?;                  // Reserved
+        let offset = 14 + 40;                         // Pixel data offset
+        f.write_all(&(offset as u32).to_le_bytes().as_ref())?;
+
+        // DIB Header (BITMAPINFOHEADER)
+        f.write_all(&40u32.to_le_bytes())?;           // Header size
+        f.write_all(&(self.w as i32).to_le_bytes())?; // Width
+        f.write_all(&(self.h as i32).to_le_bytes())?; // Height (positivo = bottom-up)
+        f.write_all(&1u16.to_le_bytes())?;            // Planes
+        f.write_all(&24u16.to_le_bytes())?;           // Bits per pixel
+        f.write_all(&0u32.to_le_bytes())?;            // Compression (BI_RGB)
+        f.write_all(&(pixel_array_size as u32).to_le_bytes())?; // Image size
+        f.write_all(&[0, 0, 0, 0])?;                  // X ppm
+        f.write_all(&[0, 0, 0, 0])?;                  // Y ppm
+        f.write_all(&[0, 0, 0, 0])?;                  // Colors in color table
+        f.write_all(&[0, 0, 0, 0])?;                  // Important colors
+
+        // Pixel data (bottom-up): escribimos filas invertidas
+        let mut row = vec![0u8; row_stride];
+        for y in (0..self.h).rev() {
+            // Convertimos RGB -> BGR por píxel
+            for x in 0..self.w {
+                let idx = (y * self.w + x) * 3;
+                row[x * 3 + 0] = self.data[idx + 2]; // B
+                row[x * 3 + 1] = self.data[idx + 1]; // G
+                row[x * 3 + 2] = self.data[idx + 0]; // R
+            }
+            // Padding ya está en 0
+            f.write_all(&row)?;
+        }
+        Ok(())
+    }
+}
+
+#[inline]
+fn edge(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> f32 {
+    (px - ax) * (by - ay) - (py - ay) * (bx - ax)
+}
+
+fn fill_triangle(
+    fb: &mut Framebuffer,
+    x0: f32, y0: f32,
+    x1: f32, y1: f32,
+    x2: f32, y2: f32,
+    r: u8, g: u8, b: u8,
+) {
+    let min_x = (x0.min(x1).min(x2)).floor().max(0.0) as i32;
+    let max_x = (x0.max(x1).max(x2)).ceil().min((fb.w - 1) as f32) as i32;
+    let min_y = (y0.min(y1).min(y2)).floor().max(0.0) as i32;
+    let max_y = (y0.max(y1).max(y2)).ceil().min((fb.h - 1) as f32) as i32;
+
+    let area = edge(x0, y0, x1, y1, x2, y2);
+    if area == 0.0 { return; }
+
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            let w0 = edge(x1, y1, x2, y2, px, py);
+            let w1 = edge(x2, y2, x0, y0, px, py);
+            let w2 = edge(x0, y0, x1, y1, px, py);
+            if (w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 && area > 0.0) ||
+               (w0 <= 0.0 && w1 <= 0.0 && w2 <= 0.0 && area < 0.0) {
+                fb.put_pixel(x, y, r, g, b);
+            }
+        }
+    }
+}
+
+fn normalize_to_screen(positions: &[Vec3]) -> (Vec<(f32, f32)>, f32, f32, f32) {
+    // Bounding box
+    let (mut minx, mut miny, mut minz) = (f32::INFINITY, f32::INFINITY, f32::INFINITY);
+    let (mut maxx, mut maxy, mut maxz) = (f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for &Vec3(x, y, z) in positions {
+        if x < minx { minx = x; } if y < miny { miny = y; } if z < minz { minz = z; }
+        if x > maxx { maxx = x; } if y > maxy { maxy = y; } if z > maxz { maxz = z; }
+    }
+    let cx = 0.5 * (minx + maxx);
+    let cy = 0.5 * (miny + maxy);
+    let sx = maxx - minx;
+    let sy = maxy - miny;
+    let max_extent = sx.max(sy).max(1e-6);
+    let scale = 0.9 * (WIDTH.min(HEIGHT) as f32) * 0.5 / max_extent;
+
+    let mut out = Vec::with_capacity(positions.len());
+    for &Vec3(x, y, _z) in positions {
+        let xs = (x - cx) * scale + (WIDTH as f32) * 0.5;
+        let ys = (y - cy) * scale + (HEIGHT as f32) * 0.5;
+        // y de pantalla hacia abajo
+        out.push((xs, (HEIGHT as f32) - ys));
+    }
+    (out, cx, cy, scale)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,7 +349,7 @@ fn main() {
         }
     }
 
-    loop {
+    let path = loop {
         print!("Ingrese el nombre del archivo .obj (ENTER para salir): ");
         io::stdout().flush().unwrap(); // Forzar a mostrar el prompt
 
@@ -238,22 +374,55 @@ fn main() {
             continue;
         }
 
-        match load_obj(path) {
-            Ok(mesh) => {
-                println!("Modelo cargado desde {}", path);
-                println!(
-                    "Vértices: {} | Coordenadas de textura: {} | Normales: {} | Triángulos: {}",
-                    mesh.positions.len(),
-                    mesh.texcoords.len(),
-                    mesh.normals.len(),
-                    mesh.indices.len() / 3
-                );
+        break path.to_string();
+    };
+
+    match load_obj(&path) {
+        Ok(mesh) => {
+            println!("Modelo cargado desde {}", &path);
+            println!(
+                "Vértices: {} | Coordenadas de textura: {} | Normales: {} | Triángulos: {}",
+                mesh.positions.len(),
+                mesh.texcoords.len(),
+                mesh.normals.len(),
+                mesh.indices.len() / 3
+            );
+
+            // === Raster ===
+            let (screen_pts, _cx, _cy, _scale) = normalize_to_screen(&mesh.positions);
+            let mut fb = Framebuffer::new(WIDTH, HEIGHT);
+            fb.clear(16, 16, 20); // fondo oscuro
+
+            // color amarillo
+            let (r, g, b) = (255u8, 255u8, 0u8);
+
+            for tri in mesh.indices.chunks_exact(3) {
+                // Cada entrada de `indices` es (v_idx, vt_idx?, vn_idx?)
+                let i0 = tri[0].0 as usize;
+                let i1 = tri[1].0 as usize;
+                let i2 = tri[2].0 as usize;
+                let (x0, y0) = screen_pts[i0];
+                let (x1, y1) = screen_pts[i1];
+                let (x2, y2) = screen_pts[i2];
+
+                // Backface culling 2D (opcional):
+                let ax = x1 - x0; let ay = y1 - y0;
+                let bx = x2 - x0; let by = y2 - y0;
+                let cross = ax * by - ay * bx;
+                // if cross <= 0.0 { continue; }
+
+                fill_triangle(&mut fb, x0, y0, x1, y1, x2, y2, r, g, b);
             }
-            Err(e) => {
-                eprintln!("Error: {}.", e);
-                eprintln!("Sugerencia: verifica permisos y formato del archivo.");
+
+            if let Err(e) = fb.save_bmp("out.bmp") {
+                eprintln!("No se pudo guardar out.bmp: {e}");
+            } else {
+                println!("Listo: se generó out.bmp ({}x{})", WIDTH, HEIGHT);
             }
         }
-        break;
+        Err(e) => {
+            eprintln!("Error: {}.", e);
+            eprintln!("Sugerencia: verifica permisos y formato del archivo.");
+        }
     }
 }
