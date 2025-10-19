@@ -129,33 +129,43 @@ fn center_and_scale_to_unit(positions: &[Vec3]) -> (Vec<Vec3>, f32, f32, f32) {
 
 fn project_perspective_to_screen(
     pts: &[Vec3],
-    angle_y: f32,
+    angle_y: f32,   // yaw
+    angle_x: f32,   // pitch
     fov_deg: f32,
     cam_dist: f32,
 ) -> (Vec<(f32,f32)>, Vec<f32>) {
     let (cw, ch) = (WIDTH as f32, HEIGHT as f32);
     let half_min = 0.5 * cw.min(ch);
     let f = 1.0 / (0.5 * fov_deg.to_radians()).tan();
+
     let (cy, sy) = (angle_y.cos(), angle_y.sin());
+    let (cx, sx) = (angle_x.cos(), angle_x.sin());
 
     let mut out = Vec::with_capacity(pts.len());
     let mut depths = Vec::with_capacity(pts.len());
 
     for &Vec3(x,y,z) in pts {
-        // rot Y
+        // Rotación en Y (yaw)
         let xr = x*cy + z*sy;
         let yr = y;
         let zr = -x*sy + z*cy;
 
-        let zc = zr + cam_dist; // z de cámara (>0 delante)
+        // Rotación en X (pitch) sobre el resultado anterior
+        let xrx = xr;
+        let yrx = yr*cx - zr*sx;
+        let zrx = yr*sx + zr*cx;
+
+        // Traslación hacia cámara (cámara en origen mirando +Z)
+        let zc = zrx + cam_dist; // > 0
         depths.push(zc);
 
-        let px = (xr * f) / zc;
-        let py = (yr * f) / zc;
+        // Proyección perspectiva
+        let px = (xrx * f) / zc;
+        let py = (yrx * f) / zc;
 
+        // A coordenadas de pantalla
         let sx = px * half_min + cw*0.5;
         let sy = -py * half_min + ch*0.5;
-
         out.push((sx, sy));
     }
     (out, depths)
@@ -252,7 +262,7 @@ fn main() {
     let (model_unit, _, _, _) = center_and_scale_to_unit(&mesh.positions);
 
     // Ventana
-    let mut window = Window::new("OBJ Viewer (A/D rotar, W/S zoom, ESC salir)",
+    let mut window = Window::new("OBJ Viewer (A/D rotar Y, ↑/↓ rotar X, W/S zoom, ESC salir)",
                                  WIDTH, HEIGHT,
                                  WindowOptions::default())
                      .expect("No se pudo crear ventana");
@@ -262,6 +272,7 @@ fn main() {
     let mut angle_y: f32 = 0.6;
     let mut fov_deg: f32 = 60.0;
     let mut cam_dist: f32 = 3.0;
+    let mut angle_x: f32 = 0.0;
 
     let mut frame = Frame::new(WIDTH, HEIGHT);
     let yellow: u32 = 0x808080; // 0xRRGGBB
@@ -272,9 +283,11 @@ fn main() {
         if window.is_key_down(Key::D) { angle_y += 0.02; }
         if window.is_key_down(Key::W) { cam_dist -= 0.05; if cam_dist < 1.5 { cam_dist = 1.5; } }
         if window.is_key_down(Key::S) { cam_dist += 0.05; }
+        if window.is_key_down(Key::Up) { angle_x += 0.02; }
+        if window.is_key_down(Key::Down) { angle_x -= 0.02; }
 
         // Proyección + depths (z_cam)
-        let (screen_pts, depths) = project_perspective_to_screen(&model_unit, angle_y, fov_deg, cam_dist);
+        let (screen_pts, depths) = project_perspective_to_screen(&model_unit, angle_y, angle_x, fov_deg, cam_dist);
 
         // Render
         frame.clear(0x101014);
