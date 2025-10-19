@@ -264,7 +264,7 @@ fn main() {
     let mut cam_dist: f32 = 3.0;
 
     let mut frame = Frame::new(WIDTH, HEIGHT);
-    let yellow: u32 = 0xFFFF00; // 0xRRGGBB
+    let yellow: u32 = 0x808080; // 0xRRGGBB
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
         // Input
